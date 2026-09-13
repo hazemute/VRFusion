@@ -1,108 +1,142 @@
-# VRFusion 0.2 — dual-eye VR spectator compositor
+# VRFusion 0.5 — one-click dual-eye VR spectator output
 
-VRFusion is a Windows spectator-output application for SteamVR. It reads SteamVR's undistorted D3D11 mirror texture for the left and right eyes, reconstructs both views into one perspective-correct spectator canvas, optionally stabilizes headset rotation, and publishes the result both to a normal desktop preview and to a synchronized cross-process D3D11 texture.
+VRFusion converts the two VR eye views into one normal widescreen spectator image for a monitor, recording, and OBS.
 
-The goal is a stream-friendly image that looks much closer to a normal game camera than a raw single-eye VR mirror.
-
-## What changed in 0.2
-
-- Full 3x3 per-eye orientation reprojection instead of yaw-only canted-display compensation.
-- Head-centered FOV bounds calculated from all four projection corners of each eye.
-- Perspective-preserving 16:9 crop; the dual-eye image is no longer independently stretched on X and Y.
-- Rotation-only spectator stabilization using the HMD pose, quaternion SLERP and a configurable maximum lag angle.
-- Stabilization overscan through configurable `zoom`.
-- Contrast-aware stereo seam that becomes harder where left/right images disagree strongly, reducing close-object ghosting.
-- Runtime modes: fused, left eye, right eye and side-by-side.
-- Runtime hotkeys and INI reload.
-- Flip-model DXGI preview swap chain with maximum frame latency set to one frame.
-- Separate shared D3D11 output texture with keyed-mutex synchronization for a future native OBS source.
-- `VRFusionSharedProbe.exe` verifies that a second process can open the GPU texture, synchronize on it and observe advancing frames.
-
-## Current architecture
+Version 0.5 changes the normal workflow to one-click operation. The user-facing entry point is now only:
 
 ```text
-SteamVR / OpenVR compositor
-     |                         HMD tracking pose
-     |                               |
-     |                               v
-     |                   quaternion spectator stabilizer
-     |                               |
-     +--> left mirror SRV -----------+---->
-     |                                     3D ray reprojection
-     +--> right mirror SRV ----------------> per-eye projection
-                                           adaptive stereo seam
-                                                   |
-                                                   v
-                                         private D3D11 output
-                                           /             \
-                                          /               \
-                              preview swap chain       shared GPU texture
-                              VRFusion Spectator       keyed mutex + event
-                                      |                       |
-                                      v                       v
-                               OBS Game Capture       VRFusion GPU Capture
-                                                     native OBS source / probe
+VRFusion.exe
 ```
 
-## Requirements
+Run it before the VR game. VRFusion performs the OpenXR setup for the current user, waits for a VR title, chooses the best available backend, starts the internal compositor, and publishes one stable `VRFusion Output` window plus the existing shared GPU output.
 
-- Windows 10 or Windows 11 x64.
-- SteamVR running with a connected headset.
-- A VR title using the SteamVR compositor.
-- Visual Studio 2022/2026 Build Tools with **Desktop development with C++**.
-- CMake 3.24 or newer.
-- Internet access on the first CMake configure. The project downloads the pinned OpenVR SDK `v2.15.6`.
+## Normal use
 
-## Build
+1. Extract the complete `dist` folder somewhere permanent.
+2. Double-click `VRFusion.exe`.
+3. Start the VR runtime/game.
+4. Use the `VRFusion Output` window on the monitor.
+5. In OBS, either use the native `VRFusion GPU Capture` source when the OBS plugin is installed, or add a Window Capture for `VRFusion Output` once. The window remains stable even if VRFusion changes backend.
 
-Run from Explorer or a terminal:
+No PowerShell OpenXR install/enable command is required for normal use.
+
+### First-run OpenXR note
+
+An OpenXR API layer must be loaded when the game creates its OpenXR instance. If VRFusion has never been run on the PC and an OpenXR game is already running, close and reopen that game once after the first VRFusion launch. After registration exists, normal use is simply `VRFusion.exe` before the game.
+
+## Automatic backend selection
+
+VRFusion chooses in this order:
+
+```text
+OpenXR + depth  -> center-eye depth reconstruction
+OpenXR color    -> stereo angular fusion
+SteamVR         -> dual-eye compositor fallback
+No VR runtime   -> wait automatically
+```
+
+The backend executables are internal in normal use:
+
+- `VRFusionXRView.exe` — OpenXR color/depth compositor.
+- `VRFusionSteamVR.exe` — SteamVR/OpenVR fallback.
+- both are started with `--headless` by `VRFusion.exe`.
+- `VRFusion Output` is owned by the controller and stays the same source during backend switches.
+
+## What 0.5 adds
+
+- New one-click `VRFusion.exe` controller.
+- Automatic per-user OpenXR API-layer registration in `HKCU`; no administrator rights are required for this registration.
+- Portable-folder repair: stale VRFusion layer registry entries are removed when the folder is moved.
+- New control/heartbeat IPC. The implicit OpenXR layer remains dormant unless a live `VRFusion.exe` heartbeat requests capture.
+- The OpenXR layer no longer depends on `VRFUSION_OPENXR` being inherited by Steam or the game launcher.
+- A running OpenXR process that already loaded the registered layer can start/stop capture when VRFusion starts/exits without recreating the OpenXR instance.
+- Automatic switching between OpenXR and SteamVR fallback.
+- Hidden backend windows in normal mode.
+- Stable user-facing `VRFusion Output` window rendered from the shared GPU texture.
+- Single-instance protection: opening `VRFusion.exe` twice focuses the existing controller instead of creating competing capture controllers.
+- D3D11 OpenXR MSAA color resolve support. MSAA depth remains a safe color-fusion fallback rather than attempting invalid depth resolve.
+- Existing OpenXR depth reconstruction, stabilization, adaptive stereo seam, telemetry, shared GPU output, and OBS source protocol are retained.
+- Windows x64 GitHub Actions workflow that builds and uploads `VRFusion-Windows-x64.zip`.
+
+## Controller buttons
+
+`Diagnostics` opens `VRFusionDoctor.exe`.
+
+`Show output` restores the stable preview if it was closed/hidden.
+
+`Restart capture` restarts only the internal compositor while keeping the controller/setup alive.
+
+`Exit` stops the active backend and the capture heartbeat.
+
+## OBS
+
+The preferred path is the native source in `obs-plugin/`:
+
+```text
+VRFusion GPU Capture
+```
+
+It opens VRFusion's D3D11 shared texture, uses keyed-mutex synchronization, and keeps the OBS scene independent from the selected VR backend.
+
+Without the plugin, add a normal Window Capture for:
+
+```text
+VRFusion Output
+```
+
+This window is intentionally owned by the controller rather than by the OpenXR/SteamVR backend, so OBS does not need a different source when the backend changes.
+
+## Build on Windows
+
+Requirements:
+
+- Windows 10/11 x64
+- Visual Studio 2022 C++ workload / MSVC
+- CMake 3.24+
+- internet access on the first configure so CMake can fetch OpenVR 2.15.6 and OpenXR SDK 1.1.63 headers
+
+Build and package:
 
 ```bat
 scripts\build.bat
 ```
 
-The script configures an x64 Release build, compiles both executables and creates:
+The packaged folder is written to:
 
 ```text
 dist\
-  VRFusion.exe
-  VRFusionSharedProbe.exe
-  openvr_api.dll
-  vrfusion.ini
-  README.md
-  STATUS.md
 ```
 
-## Run
-
-1. Start SteamVR and connect the headset.
-2. Start a VR game.
-3. Launch `VRFusion.exe`.
-4. Capture the `VRFusion Spectator` window in OBS using **Game Capture**.
-
-Recommended OBS canvas/output: `1920x1080`, `60 FPS`.
-
-## Hotkeys
-
-While the VRFusion window is focused:
+Important binaries include:
 
 ```text
-F1        fused dual-eye spectator view
-F2        left-eye diagnostic view
-F3        right-eye diagnostic view
-F4        raw side-by-side diagnostic view
-S         toggle spectator rotation stabilization
-[ / ]     reduce / increase stereo seam feather
-- / +     reduce / increase crop zoom
-R         reload runtime-safe values from vrfusion.ini
-F11       toggle borderless fullscreen preview
+VRFusion.exe                 one-click controller + stable output
+VRFusionSteamVR.exe          internal SteamVR compositor
+VRFusionXRView.exe           internal OpenXR compositor
+VRFusionOpenXRLayer.dll      implicit OpenXR capture layer
+VRFusionDoctor.exe           diagnostics
+VRFusionSharedProbe.exe      shared-output probe
+VRFusionOpenXRProbe.exe      OpenXR-capture probe
+openvr_api.dll
+XR_APILAYER_VRFusion_capture.json
+vrfusion.ini
 ```
 
-Changing `width` or `height` still requires a restart because those values determine GPU resources and swap-chain buffers.
+`VRFusionLauncher.exe` is retained only as a compatibility shim for old shortcuts; it now starts `VRFusion.exe`.
+
+## GitHub Actions build
+
+The repository includes:
+
+```text
+.github/workflows/windows-build.yml
+```
+
+A push to `main`/`master`, a `v*` tag, or manual workflow dispatch runs the x64 Windows build and uploads `VRFusion-Windows-x64.zip` as a workflow artifact.
 
 ## Configuration
 
-Default `vrfusion.ini`:
+`vrfusion.ini` still controls compositor quality/output:
 
 ```ini
 width=1920
@@ -115,111 +149,40 @@ seam_contrast=4.0
 stabilization=1
 stabilization_ms=75
 max_stabilization_deg=7
-show_fps=1
-vsync=0
+openxr_mesh_step=3
+openxr_depth_discontinuity_ratio=1.25
 ```
 
-### `zoom`
+The controller itself intentionally uses automatic defaults; normal users should not need to choose a backend or touch the OpenXR scripts.
 
-`1.00` keeps the maximum available perspective-correct FOV. Values around `1.05` to `1.15` crop a little around the edges and provide room for rotational stabilization without exposing black areas during small head movements.
+## Capture model
 
-### `feather`
+### OpenXR depth path
 
-Controls the width of the left/right transition in tangent-FOV space. Smaller values reduce stereo ghosting but make a mismatch more abrupt.
+When an OpenXR title submits `XrCompositionLayerDepthInfoKHR`, VRFusion copies color/depth data before `xrReleaseSwapchainImage`, then reconstructs a virtual spectator camera located between the physical eyes. Large depth discontinuities are rejected and uncovered regions fall back to the color compositor.
 
-### `seam_contrast`
+### OpenXR without depth
 
-Controls adaptive seam hardening. When the two eyes differ strongly at a pixel, VRFusion assumes the disagreement may be caused by close geometry/parallax and narrows the blend there. `0` disables this behavior.
+VRFusion uses the projection/FOV metadata from both eyes and produces a single angularly aligned widescreen view with an adaptive seam.
 
-### Stabilization
+### SteamVR fallback
 
-The stabilization path is rotation-only. It estimates a smoothed spectator orientation from the latest HMD pose and reprojects output rays back into the current eye views. `stabilization_ms` controls smoothing strength. `max_stabilization_deg` prevents the virtual camera from lagging arbitrarily far behind a fast head turn.
+VRFusion obtains the left/right undistorted mirror textures through OpenVR and produces the same final shared-output protocol.
 
-## Shared GPU output
+## Current technical limits
 
-VRFusion 0.2 also publishes a D3D11 texture for zero-copy consumers on the same GPU.
+- OpenXR capture is currently D3D11. D3D12 OpenXR titles still need a future backend or the SteamVR path when available.
+- MSAA color swapchains are now resolved; MSAA depth is not reconstructed in 0.5.
+- A universal center-eye image cannot be perfectly reconstructed when the title does not submit usable scene depth.
+- Newly revealed surfaces in depth reprojection cannot be recovered if neither physical eye saw them; VRFusion uses the color compositor as the fallback rather than inventing content.
+- A real HMD/runtime test is still required for final compatibility/performance validation.
 
-Protocol objects:
+## Diagnostics
 
-```text
-Local\VRFusionSharedTexture_v1   shared-memory metadata
-Local\VRFusionFrameReady_v1     frame-ready event
-```
-
-The metadata contains the output dimensions, DXGI format, producer process ID, adapter LUID, shared D3D11 handle and synchronized frame counter.
-
-The shared texture uses `IDXGIKeyedMutex`:
-
-```text
-key 0 -> producer may write
-key 1 -> consumer may read
-```
-
-The preview never waits on the consumer. If nobody is reading the shared texture, normal VRFusion rendering continues unaffected.
-
-To validate the channel, run this while VRFusion is active:
+Normally diagnostics are unnecessary. If something fails, run:
 
 ```bat
-VRFusionSharedProbe.exe
+VRFusionDoctor.exe
 ```
 
-A healthy result ends with:
-
-```text
-VRFusion shared-output probe: PASS
-```
-
-### Native OBS source
-
-The archive now includes `obs-plugin/`, an optional native OBS input source named **VRFusion GPU Capture**. It opens the shared handle with libobs, acquires consumer key `1`, performs a GPU-to-GPU copy into an OBS-owned texture, releases producer key `0`, and renders the most recent completed copy. No desktop/window capture is involved.
-
-It is not part of the default application build because compiling an OBS module requires OBS development headers and the matching `obs.lib`. Build instructions are in `obs-plugin/README.md`.
-
-## Important limitation: no scene depth yet
-
-VRFusion 0.2 still receives final color mirror textures from SteamVR, not the game's scene depth. Therefore it can correctly combine angular coverage and remove most global stereo duplication, but it cannot mathematically synthesize a perfect camera located halfway between both physical eyes for very close geometry.
-
-The adaptive seam reduces the visible error instead of pretending the missing depth does not matter.
-
-A true center-eye reconstruction requires one of these paths:
-
-1. An OpenXR API layer that intercepts color plus `XrCompositionLayerDepthInfoKHR` when a game submits depth.
-2. Game-specific depth capture.
-3. A stereo depth estimator, which costs substantially more GPU time and can introduce temporal artifacts.
-
-The OpenXR depth path is the preferred next milestone.
-
-## Troubleshooting
-
-### SteamVR initialization error
-
-SteamVR must be running and the headset must already be active before VRFusion starts.
-
-### Mirror texture acquisition error
-
-Wait until SteamVR Home/dashboard or the VR game is visibly running, then restart VRFusion.
-
-### Black output in OBS
-
-Use OBS **Game Capture** first. If another hook/capture tool conflicts with it, use Window Capture as a compatibility fallback.
-
-### Stabilized view exposes a black edge
-
-Increase `zoom`, reduce `stabilization_ms`, or reduce `max_stabilization_deg`.
-
-### Close hand/controller looks discontinuous at the center
-
-That is stereo parallax without scene depth. Try a smaller `feather` or a larger `seam_contrast`. The future depth backend is the complete solution.
-
-## Project files
-
-```text
-src/main.cpp                compositor, tracking, D3D11 rendering
-src/shared_protocol.hpp     cross-process GPU-output protocol
-src/shared_probe.cpp        independent shared-texture verification tool
-obs-plugin/                 optional native zero-copy OBS source
-scripts/build.bat           one-click Windows build
-scripts/build.ps1           CMake build + dist packaging
-vrfusion.ini                runtime configuration
-STATUS.md                   validation status and known limitations
-```
+It reports controller heartbeat, OpenXR registration/capture status, SteamVR state, final GPU output, backend, depth availability, frame counters, publish drops, and compositor timing.

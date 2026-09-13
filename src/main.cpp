@@ -406,7 +406,7 @@ public:
         PublishSharedTexture();
         lastPoseTime_ = std::chrono::steady_clock::now();
 
-        gLog << "VRFusion 0.2 initialized: " << config_.width << "x" << config_.height
+        gLog << "VRFusion 0.5 initialized: " << config_.width << "x" << config_.height
              << " @ " << config_.fps << " FPS, zoom=" << config_.zoom
              << ", stabilization=" << (config_.stabilization ? 1 : 0) << "\n";
         return true;
@@ -744,8 +744,9 @@ private:
             return false;
         }
 
-        ShowWindow(hwnd_, SW_SHOW);
-        UpdateWindow(hwnd_);
+        const bool headless = wcsstr(GetCommandLineW(), L"--headless") != nullptr;
+        ShowWindow(hwnd_, headless ? SW_HIDE : SW_SHOW);
+        if (!headless) UpdateWindow(hwnd_);
         return true;
     }
 
@@ -853,7 +854,7 @@ float4 PSMain(VSOut input) : SV_TARGET
 
     // Contrast-aware seam: large stereo disagreement means likely close geometry.
     // In those pixels the transition hardens instead of producing a double image.
-    const float rgbDiff = dot(abs(a.rgb - b.rgb), float3(0.333333, 0.333333, 0.333333));
+    const float rgbDiff = dot(abs(a.rgb - b.rgb), float3(0.433333, 0.433333, 0.433333));
     const float hardness = saturate(rgbDiff * settings.y);
     const float baseFeather = max(settings.x, 0.00001);
     const float localFeather = lerp(baseFeather, max(baseFeather * 0.12, 0.0005), hardness);
@@ -961,11 +962,14 @@ float4 PSMain(VSOut input) : SV_TARGET
         info.adapterLuidLow = adapterDesc_.AdapterLuid.LowPart;
         info.adapterLuidHigh = adapterDesc_.AdapterLuid.HighPart;
         info.sharedHandle = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(sharedTextureHandle_));
+        LARGE_INTEGER qpf{};
+        if (QueryPerformanceFrequency(&qpf)) info.qpcFrequency = qpf.QuadPart;
+        info.flags = vrfusion::SharedFrame_ProducerAlive | vrfusion::SharedFrame_SteamVR;
         std::memcpy(sharedInfo_, &info, sizeof(info));
 
         sharedFrameEvent_ = CreateEventW(nullptr, FALSE, FALSE, vrfusion::kSharedEventName);
         if (!sharedFrameEvent_) gLog << "Warning: CreateEvent for shared output failed. Win32=" << GetLastError() << "\n";
-        else gLog << "Shared GPU output published via " << "Local\\\\VRFusionSharedTexture_v1" << "\n";
+        else gLog << "Shared GPU output published via " << "Local\\\\VRFusionSharedTexture_v2" << "\n";
     }
 
     bool AcquireMirrorTextures() {
@@ -1100,6 +1104,9 @@ float4 PSMain(VSOut input) : SV_TARGET
     }
 
     void Render() {
+        LARGE_INTEGER renderStart{};
+        QueryPerformanceCounter(&renderStart);
+        ++sourceFrameCounter_;
         if (!UpdateConstantBuffer()) return;
 
         const float clear[4] = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -1136,14 +1143,27 @@ float4 PSMain(VSOut input) : SV_TARGET
         // Key 0 belongs to the producer, key 1 to the consumer. If nobody is
         // consuming the shared texture, AcquireSync simply fails after the first
         // published frame and the preview keeps running without blocking.
+        bool published = false;
         if (sharedKeyedMutex_ && sharedKeyedMutex_->AcquireSync(0, 0) == S_OK) {
             context_->CopyResource(sharedTexture_.Get(), outputTexture_.Get());
             context_->Flush();
             sharedKeyedMutex_->ReleaseSync(1);
             ++sharedFrameCounter_;
-            if (sharedInfo_) InterlockedExchange64(&sharedInfo_->frameCounter, static_cast<LONG64>(sharedFrameCounter_));
-            if (sharedFrameEvent_) SetEvent(sharedFrameEvent_);
+            published = true;
+        } else if (sharedKeyedMutex_) {
+            ++droppedPublishFrames_;
         }
+
+        LARGE_INTEGER renderEnd{};
+        QueryPerformanceCounter(&renderEnd);
+        if (sharedInfo_) {
+            InterlockedExchange64(&sharedInfo_->sourceFrameCounter, static_cast<LONG64>(sourceFrameCounter_));
+            InterlockedExchange64(&sharedInfo_->producerQpc, renderEnd.QuadPart);
+            InterlockedExchange64(&sharedInfo_->renderDurationQpc, renderEnd.QuadPart - renderStart.QuadPart);
+            InterlockedExchange64(&sharedInfo_->droppedPublishFrames, static_cast<LONG64>(droppedPublishFrames_));
+            if (published) InterlockedExchange64(&sharedInfo_->frameCounter, static_cast<LONG64>(sharedFrameCounter_));
+        }
+        if (published && sharedFrameEvent_) SetEvent(sharedFrameEvent_);
 
         const HRESULT hr = swapChain_->Present(config_.vsync ? 1u : 0u, 0);
         if (FAILED(hr) && hr != DXGI_STATUS_OCCLUDED) {
@@ -1153,10 +1173,15 @@ float4 PSMain(VSOut input) : SV_TARGET
 
     void UpdateWindowTitle() {
         std::wostringstream title;
-        title << L"VRFusion 0.2  |  " << ViewModeName(mode_)
+        title << L"VRFusion 0.5  |  " << ViewModeName(mode_)
               << L"  |  " << (config_.stabilization ? L"Stabilized" : L"Raw motion")
               << L"  |  zoom " << std::fixed << std::setprecision(2) << config_.zoom;
         if (config_.showFps) title << L"  |  " << std::setprecision(1) << measuredFps_ << L" FPS";
+        if (sharedInfo_ && sharedInfo_->qpcFrequency > 0) {
+            const double renderMs = 1000.0 * static_cast<double>(sharedInfo_->renderDurationQpc) / static_cast<double>(sharedInfo_->qpcFrequency);
+            title << L"  |  " << std::setprecision(2) << renderMs << L" ms"
+                  << L"  |  pubdrop " << sharedInfo_->droppedPublishFrames;
+        }
         SetWindowTextW(hwnd_, title.str().c_str());
     }
 
@@ -1199,6 +1224,8 @@ private:
     vrfusion::SharedFrameInfo* sharedInfo_ = nullptr;
     HANDLE sharedFrameEvent_ = nullptr;
     uint64_t sharedFrameCounter_ = 0;
+    uint64_t sourceFrameCounter_ = 0;
+    uint64_t droppedPublishFrames_ = 0;
 
     ComPtr<ID3D11VertexShader> vertexShader_;
     ComPtr<ID3D11PixelShader> pixelShader_;

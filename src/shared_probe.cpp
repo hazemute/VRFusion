@@ -45,7 +45,18 @@ int wmain() {
     std::wcout << L"Producer PID: " << info->producerPid << L"\n"
                << L"Output: " << info->width << L"x" << info->height << L"\n"
                << L"DXGI format: " << info->dxgiFormat << L"\n"
-               << L"Frame counter: " << info->frameCounter << L"\n";
+               << L"Frame counter: " << info->frameCounter << L"\n"
+               << L"Source frame counter: " << info->sourceFrameCounter << L"\n"
+               << L"Publish drops: " << info->droppedPublishFrames << L"\n";
+    if (info->qpcFrequency > 0) {
+        LARGE_INTEGER now{}; QueryPerformanceCounter(&now);
+        const LONG64 qpc = info->producerQpc;
+        const LONG64 renderQpc = info->renderDurationQpc;
+        if (qpc > 0) {
+            std::wcout << L"Frame age: " << (1000.0 * double(now.QuadPart - qpc) / double(info->qpcFrequency)) << L" ms\n";
+        }
+        std::wcout << L"CPU compositor time: " << (1000.0 * double(renderQpc) / double(info->qpcFrequency)) << L" ms\n";
+    }
 
     ComPtr<IDXGIFactory1> factory;
     HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&factory));

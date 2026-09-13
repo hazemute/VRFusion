@@ -2,6 +2,7 @@
 
 #include <obs-module.h>
 #include <graphics/graphics.h>
+#include <util/platform.h>
 
 #include <cstdint>
 
@@ -25,6 +26,8 @@ struct VRFusionSource {
     uint64_t openedHandle = 0;
     uint32_t width = 1920;
     uint32_t height = 1080;
+    LONG64 lastFrameCounter = -1;
+    uint64_t lastWarnNs = 0;
 };
 
 void CloseMapping(VRFusionSource *ctx)
@@ -156,6 +159,16 @@ void SourceRender(void *data, gs_effect_t *)
 {
     auto *ctx = static_cast<VRFusionSource *>(data);
     if (!ctx || !EnsureMapping(ctx) || !EnsureTextures(ctx)) return;
+
+    const LONG64 frameCounter = ctx->info->frameCounter;
+    const uint64_t nowNs = os_gettime_ns();
+    if (frameCounter == ctx->lastFrameCounter && ctx->lastWarnNs && nowNs - ctx->lastWarnNs > 5000000000ULL) {
+        blog(LOG_WARNING, "[VRFusion] Producer frame counter is not advancing (frame=%lld)", static_cast<long long>(frameCounter));
+        ctx->lastWarnNs = nowNs;
+    } else if (frameCounter != ctx->lastFrameCounter) {
+        ctx->lastFrameCounter = frameCounter;
+        if (!ctx->lastWarnNs) ctx->lastWarnNs = nowNs;
+    }
 
     // Never block OBS. If the producer has not published a new key-1 frame,
     // keep rendering our previous local GPU copy.

@@ -1,52 +1,60 @@
-# VRFusion 0.2 status
+# VRFusion 0.5 validation status
 
 ## Implemented
 
-- SteamVR/OpenVR background initialization.
-- SteamVR-selected DXGI adapter and D3D11 device.
-- Separate left/right undistorted compositor mirror SRVs.
-- Raw per-eye projection from `GetProjectionRaw`.
-- Full 3x3 eye-to-head orientation handling from `GetEyeToHeadTransform`.
-- Head-centered bounds reconstructed from all four eye projection corners.
-- Perspective-correct 16:9 crop with configurable overscan/zoom.
-- GPU-only fused spectator shader.
-- Contrast-aware adaptive seam to reduce high-disparity blending.
-- Fused / left / right / side-by-side view modes.
-- Rotation-only spectator stabilization from compositor HMD pose.
-- Quaternion SLERP smoothing and maximum stabilization lag clamp.
-- Flip-model DXGI preview swap chain with one-frame maximum latency.
-- Runtime hotkeys and INI reload for non-resource settings.
-- Independent shared D3D11 texture with `IDXGIKeyedMutex` producer/consumer synchronization.
-- Shared-memory metadata containing GPU LUID, dimensions, format, handle and frame counter.
-- Frame-ready named event.
-- `VRFusionSharedProbe` second-process validation utility.
-- Optional native OBS input-source code using libobs shared-texture and keyed-mutex APIs.
-- Release packaging script.
+- One-click `VRFusion.exe` controller.
+- Automatic HKCU OpenXR implicit-layer registration and stale-path cleanup.
+- Controller heartbeat/control protocol; OpenXR layer capture is dormant without a live controller.
+- Automatic OpenXR/SteamVR backend selection and switching.
+- Hidden internal backend windows.
+- Stable `VRFusion Output` monitor/Window-Capture surface owned by the controller.
+- D3D11 shared-texture consumer in the controller with keyed-mutex synchronization and GPU copy before display.
+- Existing shared GPU output remains available to the OBS plugin.
+- Single-instance controller behavior.
+- D3D11 OpenXR MSAA color resolve path.
+- Safe fallback when MSAA depth cannot be reconstructed.
+- OpenXR depth-center reconstruction and color-fusion fallback from 0.4 retained.
+- GitHub Actions Windows x64 artifact workflow.
+- Legacy `VRFusionLauncher.exe` retained as a compatibility shim.
 
-## Source/API validation performed here
+## Source/package checks performed in this environment
 
-- Checked the current Valve OpenVR release listing; SDK 2.15.6 is still marked latest at the time this project was prepared.
-- Cross-checked `GetMirrorTextureD3D11`, `ReleaseMirrorTextureD3D11` and `GetLastPoseForTrackedDeviceIndex` against current OpenVR headers.
-- Checked the project for balanced C++ delimiters and stale development-marker tokens in source files.
-- Checked that the shared-output producer and probe use opposite keyed-mutex keys and that the preview path never blocks on a missing consumer.
-- Removed the unused experimental OpenXR directory left over from 0.1.
+The final source package is checked for:
 
-## Not executable in this environment
+- JSON validity of the OpenXR manifest.
+- balanced C/C++ braces/parentheses with a structural checker.
+- expected source/binary target references in CMake/build scripts.
+- absence of obsolete 0.4 product-version strings in active source/documentation.
+- SHA-256 source manifest consistency.
+- ZIP integrity by extraction/test.
 
-- Native MSVC compilation: this environment is Linux and does not contain the Windows SDK headers/libraries required for D3D11/DXGI builds.
-- SteamVR/HMD runtime test: no VR headset or SteamVR compositor is attached here.
-- OBS live capture test for the same reason.
+## Not honestly validated here
 
-The included Windows build script is intentionally strict: a compiler or linker error stops packaging rather than silently producing a partial `dist` folder.
+This environment does not provide Windows SDK/D3D11 runtime, MSVC link libraries, SteamVR/OpenXR runtime, OBS, or a physical HMD. Therefore the following must not be represented as passed until run on Windows:
 
-## Known technical limitations
+- MSVC x64 compile/link.
+- API-layer loading in a real OpenXR title.
+- SteamVR mirror capture with a real headset.
+- MSAA resolve behavior on real OpenXR swapchains.
+- D3D keyed-mutex interoperability across the controller/backend processes on a real GPU driver.
+- OBS plugin loading/capture.
+- headset-specific FOV/canted-display quality.
+- measured GPU/CPU latency and frame pacing.
 
-- SteamVR mirror textures contain final color, not guaranteed scene depth.
-- True center-eye reprojection of close geometry therefore remains impossible in the generic SteamVR backend.
-- Rotational stabilization is depth-independent; translation is intentionally not stabilized because doing so without depth would cause larger parallax errors.
-- A SteamVR compositor restart while VRFusion is running can invalidate mirror resources; restart VRFusion after restarting SteamVR.
-- The shared GPU protocol is local-machine, same-adapter D3D11 only.
+## First real Windows test order
 
-## Recommended next milestone
+1. Run `scripts\build.bat`.
+2. Start `dist\VRFusion.exe` before the VR game.
+3. Confirm the controller says `READY`, then `LIVE` after the title starts.
+4. Confirm `VRFusion Output` shows a continuously updating combined image.
+5. Run `VRFusionDoctor.exe` and save the output if anything is not `READY`/advancing.
+6. Test a D3D11 OpenXR title with depth, a title without depth, and a SteamVR fallback title.
+7. Test OBS using `VRFusion GPU Capture` when the plugin is built, otherwise Window Capture on `VRFusion Output`.
 
-Add an OpenXR API-layer backend that observes submitted `XrCompositionLayerProjection` views and consumes `XrCompositionLayerDepthInfoKHR` when available. With depth, VRFusion can reproject both eyes into an actual center camera instead of only choosing/blending angular coverage.
+## Known limitations
+
+- OpenXR backend remains D3D11-only.
+- D3D11 MSAA color is supported, but MSAA depth falls back to non-depth stereo fusion.
+- The implicit API layer must already be registered when an OpenXR process creates its instance. On the very first VRFusion run, an already-running OpenXR game may need one restart. Future launches require no manual setup.
+- Always-loaded implicit-layer bookkeeping is intentionally minimal while the controller heartbeat is absent, but real-title compatibility still requires testing.
+- Depth disocclusions expose scene regions no physical eye saw; the compositor fills from its angular color background rather than hallucinating missing scene data.
